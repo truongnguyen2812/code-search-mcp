@@ -1,89 +1,138 @@
 # code-search-mcp
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that indexes and searches codebases using [tree-sitter](https://tree-sitter.github.io/tree-sitter/) for symbol extraction and SQLite for fast querying. Symbol extraction is strongest for Java/Kotlin/C/C++, and the index now also includes Go, Groovy/Gradle, Ruby, JSON, XML, YAML, AIDL, Makefiles, and other text source formats for language-aware search and LSP-driven navigation.
+[![License: MIT](https://img.shields.io/badge/license-MIT-000000.svg?style=flat-square&labelColor=24292e&logo=github&logoColor=white)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-000000.svg?style=flat-square&labelColor=24292e&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Model Context Protocol](https://img.shields.io/badge/mcp-1.0.0-000000.svg?style=flat-square&labelColor=24292e&logo=json&logoColor=white)](https://modelcontextprotocol.io)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-000000.svg?style=flat-square&labelColor=24292e&logo=linux&logoColor=white)](#)
 
-## Features
+A high-performance Model Context Protocol (MCP) server that indexes and searches codebases using tree-sitter for rich symbol/AST extraction and SQLite FTS5 (Trigram) for blistering fast text-search and symbol resolution.
 
-- **Symbol search** — find classes, methods, functions, fields by name or glob pattern using FTS5 full-text indexing
-- **Go to definition** — locate where a symbol is defined with file, line, signature, and optionally enhanced via LSP
-- **Find references** — find all usages of a symbol across the codebase; uses LSP for precision when available, falls back to text index
-- **Full-text search** — fast FTS5-powered text search across all indexed source lines with regex support
-- **AST queries** — run tree-sitter S-expression pattern queries against any source file
-- **File listing** — browse indexed files filtered by path or language
-- **Indexing status** — live progress and per-language/kind breakdown
-- **Incremental updates** — file watcher re-indexes changed files automatically
-- **Dual transport** — stdio (for Claude Desktop / Claude CLI) or Streamable HTTP MCP
+Ideal for large-scale source trees, it features first-class parser support for Java, Kotlin, C, and C++, with extended support for Go, Groovy, Gradle, Ruby, JSON, XML, YAML, AIDL, Makefiles, and other source formats.
 
-## Database documentation
+---
 
-- See docs/database.md for schema details, progress semantics, and troubleshooting for row-limit confusion (for example seeing only 1000 C files in a viewer).
+## System Architecture
+
+```mermaid
+graph TD
+    A[Start Server --local /path] --> B[File Discovery & Exclusions]
+    B --> C{File Hash Changed?}
+    C -- No / Unchanged --> D[Skip Re-indexing]
+    C -- Yes / New --> E[Parse with Tree-sitter]
+    E --> F[Extract AST Symbols & Lines]
+    F --> G[(SQLite DB)]
+    G --> H[SQLite Triggers]
+    H --> I[symbols_fts / file_lines_fts]
+    J[File System Watcher] -->|Debounced Events| B
+```
+
+```mermaid
+graph TD
+    A[MCP Client Tool Request] --> B{FTS Trigram Ready?}
+    B -- Yes --> C[FTS5 Trigram Substring Search]
+    B -- No --> D[Synchronous LIKE Fallback]
+    C & D --> E{LSP Active & Configured?}
+    E -- Yes --> F[LSP Go-to-Def / References]
+    E -- No --> G[Raw SQLite Index Lookup]
+    F & G --> H[Formatted MCP Response]
+```
+
+---
+
+## Key Features
+
+*   **Trigram-Powered Full-Text Search**: Replaces sluggish `LIKE '%term%'` scans with inverted SQLite FTS5 trigram indexes for sub-millisecond keyword lookup.
+*   **AST Structural Queries**: Run raw tree-sitter S-expression queries against files to find complex patterns beyond regular expressions.
+*   **Multi-Language Extractor**: Rich AST parser definitions spanning Java, Kotlin, C/C++, Go, Ruby, and many structural config formats.
+*   **Intelligent LSP Integration**: Spawns and interacts with language servers (`jdtls`, `clangd`, etc.) on-demand to fetch precise compile-time definitions and references.
+*   **Zero-Blocking Background Rebuilds**: Heavily parallelized background indexing with SQLite trigger synchronization so the server stays active immediately.
+*   **Live File Watcher**: Automatic debounced incremental updates whenever source files are created, modified, or deleted.
+
+---
+
+## Table of Contents
+- [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Build from Source](#build-from-source)
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+- [Editor & Client Integrations](#editor--client-integrations)
+  - [Claude Desktop](#claude-desktop)
+  - [Claude CLI](#claude-cli-copilot)
+  - [Gemini & Antigravity CLI](#gemini--antigravity-cli)
+  - [VS Code](#using-code-search-mcp-in-vs-code)
+- [MCP Tools Reference](#mcp-tools-reference)
+- [Deep Dive: How Search & Indexing Works](#deep-dive-how-search--indexing-works)
+- [Database Schema](#database-schema)
+- [Development Commands](#development-commands)
+- [License](#license)
 
 ---
 
 ## Installation
 
 ### Prerequisites
+*   **Rust 1.85+** : Install via [rustup.rs](https://rustup.rs).
+*   **A local codebase checkout** (e.g., AOSP checkout, your project folder).
 
-- **Rust 1.85+** (edition 2024): https://rustup.rs
-- **A local source checkout** (see [Downloading the Source](https://source.android.com/docs/setup/download/downloading))
-
-### Build from source
-
+### Build from Source
 ```bash
 git clone https://github.com/your-org/code-search-mcp
 cd code-search-mcp
 cargo build --release
 ```
-
-The binary is placed at `target/release/code-search-mcp`.
+The optimized binary will be created at `target/release/code-search-mcp`.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Index a local source checkout and start the MCP server on stdio
-./target/release/code-search-mcp --local /path/to/aosp
+# 1. Index a codebase and start the MCP server on stdio (default)
+./target/release/code-search-mcp --local /path/to/source
 
-# Use a custom database location
-./target/release/code-search-mcp --local /path/to/aosp --db /var/data/aosp.db
+# 2. Specify a custom database storage location
+./target/release/code-search-mcp --local /path/to/source --db /var/data/index.db
 
-# Start over Streamable HTTP MCP transport
-./target/release/code-search-mcp --local /path/to/aosp --transport http --port 3000
+# 3. Start the server over Streamable HTTP transport (port 3000)
+./target/release/code-search-mcp --local /path/to/source --transport http --port 3000
 
-# Query-only mode (no indexing, use an existing database)
-./target/release/code-search-mcp --db /var/data/aosp.db
+# 4. Query-only mode (starts instantly without indexing or writing files)
+./target/release/code-search-mcp --db /var/data/index.db
 ```
 
-Indexing runs in the background. You can start querying immediately; results improve as more files are indexed. Use the `index_status` tool to monitor progress.
+> [!TIP]
+> Indexing runs completely in the background. You can start querying the server immediately; search quality will dynamically improve as database rows populate. Use the `index_status` tool to track live progress.
 
 ---
 
 ## CLI Reference
 
-| Flag | Env var | Default | Description |
-|---|---|---|---|
-| `--local <PATH>` | `SEARCH_LOCAL_PATH` | — | Path to the source checkout to index and watch |
-| `--db <PATH>` | `SEARCH_DB_PATH` | `~/.code-search-mcp/index.db` | SQLite database file |
-| `--transport <MODE>` | `SEARCH_TRANSPORT` | `stdio` | Transport: `stdio` or `http` |
-| `--port <PORT>` | `SEARCH_HTTP_PORT` | `3000` | HTTP port (MCP endpoint: `/mcp`; only used with `--transport http`) |
-| `--index-threads <N>` | `SEARCH_INDEX_THREADS` | `4` | Parallel indexing threads |
-| `--no-watch` | — | `false` | Disable incremental file watcher |
+| Flag | Env Var | Default | Description |
+|:---|:---|:---|:---|
+| `--local <PATH>` | `SEARCH_LOCAL_PATH` | — | Path to the source checkout directory to index and watch. |
+| `--db <PATH>` | `SEARCH_DB_PATH` | `~/.code-search-mcp/index.db` | SQLite database file storage path. |
+| `--transport <MODE>` | `SEARCH_TRANSPORT` | `stdio` | Transport protocol: `stdio` (interactive CLI/Desktop) or `http`. |
+| `--port <PORT>` | `SEARCH_HTTP_PORT` | `3000` | HTTP port (MCP endpoint: `/mcp`; used only with `--transport http`). |
+| `--index-threads <N>`| `SEARCH_INDEX_THREADS`| *CPU Cores* | Maximum parallel indexing workers. |
+| `--no-watch` | — | `false` | Disable the file watcher for incremental file updates. |
+| `--no-fts-rebuild` | — | `false` | Skip the background FTS trigram index builder (runs query-only text searches). |
 
-Enable verbose logging with `RUST_LOG=debug`.
+Enable verbose logging by prefixing execution with `RUST_LOG=debug`.
 
 ---
 
-## Integrating with Claude Desktop
+## Editor & Client Integrations
 
-Add the following to your `claude_desktop_config.json`:
+### Claude Desktop
+Add this server block to your `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "code-search": {
       "command": "/path/to/code-search-mcp",
-      "args": ["--local", "/path/to/aosp"],
+      "args": ["--local", "/path/to/source"],
       "env": {
         "SEARCH_INDEX_THREADS": "8"
       }
@@ -92,100 +141,128 @@ Add the following to your `claude_desktop_config.json`:
 }
 ```
 
-Config file locations:
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+#### Configuration Locations:
+*   **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+*   **Linux**: `~/.config/Claude/claude_desktop_config.json`
+*   **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ---
 
-## Integrating with Claude CLI (Copilot)
-
+### Claude CLI (Copilot)
+Start the server in HTTP mode, then register it via GitHub CLI:
 ```bash
-# Start the server in Streamable HTTP mode, then add it
-./code-search-mcp --local /path/to/aosp --transport http --port 3000 &
+./code-search-mcp --local /path/to/source --transport http --port 3000 &
 gh copilot mcp add code-search http://localhost:3000/mcp
 ```
-
-Or configure it as a stdio server in your `~/.copilot/mcp.json`.
+Or configure it as a standard `stdio` command server directly in your `~/.copilot/mcp.json`.
 
 ---
 
-## Using `code-search` MCP In VS Code
+### Gemini & Antigravity CLI
+You can integrate the server directly with the **Antigravity CLI (and Antigravity 2.0 Desktop)** or the older **Gemini CLI** using the shared agent harness.
 
-If you use VS Code MCP config (`.vscode/mcp.json`), this project can be connected as an HTTP MCP server named `code-search`.
+#### Antigravity CLI & Desktop
+Shared configurations are stored in the central `mcp_config.json` file.
+*   **Location**: `~/.gemini/config/mcp_config.json` (or click **Manage MCP Servers > View raw config** in the agent UI panel).
 
-### 1) Start the server
-
-From the project root:
-
-```bash
-cargo run -- --local /path/to/source --transport http --port 3000
+Add the following config configuration:
+```json
+{
+  "mcpServers": {
+    "code-search": {
+      "command": "/path/to/code-search-mcp",
+      "args": [
+        "--local",
+        "/path/to/source"
+      ],
+      "env": {
+        "SEARCH_INDEX_THREADS": "8"
+      }
+    }
+  }
+}
 ```
 
-Keep this process running. The MCP endpoint is:
+#### Gemini CLI (Legacy)
+*   **Location**: `~/.gemini/settings.json`
 
-```text
-http://localhost:3000/mcp
+```json
+{
+  "mcpServers": {
+    "code-search": {
+      "command": "/path/to/code-search-mcp",
+      "args": [
+        "--local",
+        "/path/to/source"
+      ]
+    }
+  }
+}
 ```
 
-### 2) Configure `.vscode/mcp.json`
+---
 
-Use:
+### Using `code-search` MCP In VS Code
+You can connect this project to any MCP-supporting VS Code client (e.g. Cursor or VS Code MCP plugin) using either a **Stdio** or **HTTP** configuration inside `.vscode/mcp.json`.
 
+#### Option A: Stdio Connection (Recommended)
+This runs the binary automatically whenever your editor workspace loads:
 ```json
 {
   "servers": {
     "code-search": {
-      "url": "http://localhost:3000/mcp",
-      "type": "http"
+      "command": "/path/to/code-search-mcp",
+      "args": ["--local", "/path/to/source"],
+      "type": "stdio"
     }
   },
   "inputs": []
 }
 ```
 
-### 3) Validate the connection
+#### Option B: HTTP Streamable Connection
+Ideal for debugging, this connects to an already running background server.
 
-Call `index_status` first. A healthy response includes fields such as `status`, `total_files`, and `total_symbols`.
+1.  **Start the Server**:
+    ```bash
+    ./target/release/code-search-mcp --local /path/to/source --transport http --port 3000
+    ```
+2.  **Configure `.vscode/mcp.json`**:
+    ```json
+    {
+      "servers": {
+        "code-search": {
+          "url": "http://localhost:3000/mcp",
+          "type": "http"
+        }
+      },
+      "inputs": []
+    }
+    ```
 
-Then try:
-
-- `list_files` to confirm files are indexed
-- `search_symbols` to find classes/methods quickly
-- `go_to_definition` and `find_references` for navigation
-- `search_text` for grep-style lookup
-- `ast_query` for structural queries in a specific file
-
-### Common connectivity checks
-
-- Confirm the server process is still running.
-- Confirm the URL includes `/mcp` (not just host + port).
-- Confirm port `3000` in `.vscode/mcp.json` matches the server `--port` value.
-- If the port is in use, pick another one and update both the run command and `.vscode/mcp.json`.
+#### Validate the connection
+Call the `index_status` tool to verify the connection. Once connected, use `search_symbols` or `search_text` to explore!
 
 ---
 
-## MCP Tools
+## MCP Tools Reference
 
-### `search_symbols`
+The server registers exactly **8 active tools** (implemented in `src/tools/` and exposed via the main server module). Below is the complete listing and documentation for every registered tool:
 
-Search for symbols (classes, methods, functions, fields) by name or glob pattern.
+### 1. `search_symbols`
+Search for symbols (classes, methods, functions, properties, structs) by name or glob pattern.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `query` | string | ✅ | Symbol name or glob (`Activity`, `on*`, `Binder*`) |
-| `language` | string | — | Filter by indexed language key (for example: `java`, `kotlin`, `c`, `cpp`, `go`, `groovy`, `gradle`, `rb`, `json`, `xml`, `yaml`, `aidl`, `make`) |
-| `kind` | string | — | Filter: `class`, `method`, `function`, `field`, `property`, `struct`, `enum`, `interface` |
-| `limit` | number | — | Max results (default: 50, max: 500) |
+#### Parameters:
+*   `query` (string, **Required**): Symbol name or glob pattern (e.g. `Activity`, `on*`, `Binder*`).
+*   `language` (string, *Optional*): Filter by language key (e.g. `java`, `kotlin`, `c`, `cpp`, `go`, `groovy`, `gradle`, `rb`, `json`, `xml`, `yaml`, `aidl`, `make`).
+*   `kind` (string, *Optional*): Filter by kind: `class`, `method`, `function`, `field`, `property`, `struct`, `enum`, `interface`.
+*   `limit` (number, *Optional*): Maximum result limit (Default: 50, Max: 500).
 
-**Example:**
 ```json
+// Request
 { "query": "ActivityManager", "language": "java", "kind": "class" }
-```
 
-**Response:**
-```json
+// Response
 [
   {
     "name": "ActivityManager",
@@ -202,40 +279,34 @@ Search for symbols (classes, methods, functions, fields) by name or glob pattern
 
 ---
 
-### `go_to_definition`
+### 2. `go_to_definition`
+Find where a specific symbol is defined. Leverages active LSP servers for precision when available, falling back seamlessly to SQLite database definitions.
 
-Find where a symbol is defined. Uses the LSP server for precision when available.
+#### Parameters:
+*   `symbol` (string, **Required**): Exact case-sensitive name of the symbol.
+*   `language` (string, *Optional*): Narrow search scope to a language.
+*   `container` (string, *Optional*): Narrow search scope to a class/module namespace.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `symbol` | string | ✅ | Exact symbol name |
-| `language` | string | — | Narrow by language |
-| `container` | string | — | Narrow by container/class name |
-
-**Example:**
 ```json
+// Request
 { "symbol": "startActivity", "language": "java" }
 ```
 
 ---
 
-### `find_references`
+### 3. `find_references`
+Find all usages/references of a symbol. Backed by active LSP clients when possible; falls back to full-text indices.
 
-Find all usages of a symbol. LSP-backed when a language server is configured; falls back to text index search.
+#### Parameters:
+*   `symbol` (string, **Required**): Symbol name.
+*   `language` (string, *Optional*): Restrict references to a single language.
+*   `limit` (number, *Optional*): Maximum result count (Default: 100, Max: 500).
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `symbol` | string | ✅ | Symbol name to find usages of |
-| `language` | string | — | Restrict to a language |
-| `limit` | number | — | Max results (default: 100, max: 500) |
-
-**Example:**
 ```json
+// Request
 { "symbol": "Binder", "language": "java", "limit": 50 }
-```
 
-**Response:**
-```json
+// Response
 [
   {
     "file": "frameworks/base/core/java/android/os/ServiceManager.java",
@@ -248,46 +319,67 @@ Find all usages of a symbol. LSP-backed when a language server is configured; fa
 
 ---
 
-### `search_text`
+### 4. `search_text`
+Run full-text searches across all indexed source files. Extremely fast trigram matching with optional regex filter passes.
 
-Full-text search across all indexed source lines. Uses FTS5 for fast matching; supports regex.
+#### Parameters:
+*   `query` (string, **Required**): Plain-text keyword or regular expression pattern.
+*   `regex` (boolean, *Optional*): Treat query as a regex pattern (Default: `false`).
+*   `language` (string, *Optional*): Restrict search to a language.
+*   `path_filter` (string, *Optional*): Path substring filter (e.g. `frameworks/base`).
+*   `limit` (number, *Optional*): Max results (Default: 100, Max: 1000).
+*   `context_lines` (number, *Optional*): Number of context lines to return around matching lines (Default: 2, Max: 10).
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `query` | string | ✅ | Text or regex pattern |
-| `regex` | boolean | — | Treat `query` as a regex (default: `false`) |
-| `language` | string | — | Filter by language |
-| `path_filter` | string | — | Filter to files matching this path substring |
-| `limit` | number | — | Max results (default: 100, max: 1000) |
-| `context_lines` | number | — | Lines of context around each match (default: 2, max: 10) |
-
-**Examples:**
 ```json
-{ "query": "PackageManager", "path_filter": "frameworks/base", "limit": 20 }
+// Request
 { "query": "void on\\w+\\(", "regex": true, "language": "java" }
 ```
 
 ---
 
-### `ast_query`
+### 5. `list_files`
+List all indexed files, optionally filtered by path strings or language.
 
-Execute a tree-sitter S-expression pattern query against a specific source file. Useful for structural code search beyond simple text matching.
+#### Parameters:
+*   `path_filter` (string, *Optional*): Path substring or glob pattern (e.g. `*.java`).
+*   `language` (string, *Optional*): Filter by language.
+*   `limit` (number, *Optional*): Max results (Default: 200, Max: 2000).
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `file_path` | string | ✅ | Absolute path to the source file |
-| `pattern` | string | ✅ | tree-sitter S-expression query |
+---
 
-**Example — find all method declarations in a Java file:**
+### 6. `read_file`
+Read the complete string content of a source file directly from the filesystem.
+
+#### Parameters:
+*   `file_path` (string, **Required**): Absolute path to the file on disk.
+
 ```json
+// Request
+{ "file_path": "/Users/tnguyen/code-search-mcp/src/main.rs" }
+
+// Response
+{
+  "content": "pub struct Cli { ... }"
+}
+```
+
+---
+
+### 7. `ast_query`
+Execute a tree-sitter S-expression structural query directly against a specific source file. This bypasses text searches to locate complex structural grammar definitions.
+
+#### Parameters:
+*   `file_path` (string, **Required**): Absolute path to the source file.
+*   `pattern` (string, **Required**): Tree-sitter S-expression query pattern.
+
+```json
+// Request (Find all method definitions in an Activity file)
 {
   "file_path": "/aosp/frameworks/base/core/java/android/app/Activity.java",
   "pattern": "(method_declaration name: (identifier) @method.name)"
 }
-```
 
-**Response:**
-```json
+// Response
 [
   {
     "capture_name": "method.name",
@@ -300,78 +392,16 @@ Execute a tree-sitter S-expression pattern query against a specific source file.
 ]
 ```
 
-See the [tree-sitter query syntax documentation](https://tree-sitter.github.io/tree-sitter/using-parsers#pattern-matching-with-queries) for pattern reference.
-
-### How Symbol Search Works (With AST Query Example)
-
-Use this mental model:
-
-1. `search_symbols` is index-first symbol lookup.
-2. `ast_query` is file-local structural pattern matching.
-3. They are complementary: find candidate symbol/file quickly, then run structural checks in that file.
-
-#### `search_symbols` flow
-
-1. Query `symbols_fts` first for fast symbol-name lookup.
-2. Join to `symbols` and `files` to return symbol metadata (kind, container, file, position).
-3. If FTS gives no result (or fails to parse), fallback to `LIKE` on `symbols.name`.
-4. Optional filters (`language`, `kind`) are applied in SQL.
-
-#### `ast_query` flow
-
-1. Read the target file from disk (not from SQLite symbol tables).
-2. Parse that file with tree-sitter for the file language.
-3. Execute your S-expression query pattern.
-4. Return exact capture text + positions for each AST match.
-
-#### Practical example
-
-Step 1: Find candidate class files by symbol name.
-
-```json
-{ "query": "ActivityManager", "language": "java", "kind": "class" }
-```
-
-Step 2: In one returned file, find all method declarations structurally.
-
-```json
-{
-  "file_path": "/aosp/frameworks/base/core/java/android/app/ActivityManager.java",
-  "pattern": "(method_declaration name: (identifier) @method.name)"
-}
-```
-
-Why this pattern helps:
-
-- `search_symbols` is fast for discovery across the whole codebase.
-- `ast_query` is precise for shape-based matching inside a single file.
-- Combining both avoids broad text grep and reduces false positives.
+> [!TIP]
+> Refer to the official [tree-sitter query documentation](https://tree-sitter.github.io/tree-sitter/using-parsers#pattern-matching-with-queries) for full expression syntax.
 
 ---
 
-### `list_files`
+### 8. `index_status`
+Retrieve server indexing statistics, diagnostics, and language distribution counts.
 
-List indexed source files, optionally filtered by path or language.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `path_filter` | string | — | Path substring or glob (e.g. `frameworks/base`, `*.java`) |
-| `language` | string | — | Filter by language |
-| `limit` | number | — | Max results (default: 200, max: 2000) |
-
-**Example:**
 ```json
-{ "path_filter": "frameworks/base/services", "language": "java" }
-```
-
----
-
-### `index_status`
-
-Get the current indexing status and statistics.
-
-**Example response:**
-```json
+// Response
 {
   "status": "indexing",
   "total_files": 142500,
@@ -383,127 +413,61 @@ Get the current indexing status and statistics.
 }
 ```
 
-Status values: `idle` → `indexing` → `done`.
+> [!NOTE]
+> *Why are there 9 files in `src/tools/` but only 8 tools registered?*  
+> The `src/tools/` directory contains `mod.rs`, which is simply the Rust module configuration file grouping the imports together. There are exactly 8 distinct functional tools registered inside the main server handler and exposed over the MCP protocol.
 
 ---
 
-## How Search And Indexing Work By Tool
+## Deep Dive: How Search & Indexing Works
 
-This section explains which indexed tables each tool reads, and where LSP or direct file parsing is used.
+Use this mental model to understand how `code-search-mcp` coordinates its systems:
 
-### Shared indexing pipeline (used by all query tools)
+### 1. The Indexing Pipeline
+*   **Discovery**: The server scans your `--local` directory recursively, filtering files by extension and checking `.gitignore` exclusions.
+*   **Incremental Hashing**: Files are MD5/SHA hashed. If the database already holds an identical hash for a file, it skips it entirely.
+*   **AST Symbol Extraction**: High-performance tree-sitter parsers run against the code, compiling structures into `symbols` rows (`name`, `kind`, `container`, `signature`, lines).
+*   **Line Mapping**: File contents are broken down into individual lines inside `file_lines` for text search.
+*   **Trigger Sync**: SQLite triggers dynamically mirror rows from `symbols` and `file_lines` into their respective virtual FTS5 index tables (`symbols_fts` and `file_lines_fts`).
 
-1. File discovery walks the `--local` tree and keeps only recognized source/text extensions.
-2. Each file is hashed; unchanged files are skipped.
-3. `files` row is upserted (`path`, `language`, `mtime`, `hash`).
-4. Language extractor builds symbols and writes `symbols` rows.
-5. File content is split into lines and stored in `file_lines`.
-6. FTS trigger tables (`symbols_fts`, `file_lines_fts`) are auto-maintained by SQLite triggers.
-
-### `search_symbols`
-
-- Primary source: `symbols_fts` (FTS prefix query) joined with `symbols` + `files`.
-- Fallback: `LIKE` search on `symbols.name` when FTS is empty or query parsing fails.
-- Best results for languages with stronger extractors (Java/Kotlin/C/C++ and migrated AST languages).
-
-### `go_to_definition`
-
-- First pass: `symbols` table exact symbol-name lookup (plus optional language/container filters).
-- Optional precision step: LSP `textDocument/definition` from candidate source position.
-- If no symbol-row candidate exists, it bootstraps from a matching `file_lines` anchor and tries LSP.
-
-### `find_references`
-
-- First pass: tries LSP `textDocument/references` from indexed definition position.
-- If no definition symbol exists, uses a `file_lines` anchor to bootstrap LSP.
-- Fallback: heuristic `LIKE` search over `file_lines.content`.
-
-### `search_text`
-
-- Reads indexed `file_lines` joined with `files`.
-- Supports plain substring and optional regex filtering in Rust.
-- Returns matching lines with optional context window.
-
-### `ast_query`
-
-- Does not use SQLite index tables.
-- Reads the target file from disk and runs a tree-sitter query pattern directly.
-- Only supported for languages with configured tree-sitter AST query handling.
-
-### `list_files`
-
-- Reads only the `files` table.
-- Optional language/path filters and result limit.
-
-### `read_file`
-
-- Does not use SQLite index tables.
-- Reads the entire target file from disk and returns its string contents.
-
-### `index_status`
-
-- Reads progress counters from `index_progress`.
-- Reads aggregate counts from `files` and `symbols`.
-- Includes language and symbol-kind breakdown from grouped SQL queries.
+### 2. The Query Pipeline
+*   `search_symbols` queries the `symbols_fts` index directly for sub-millisecond glob/prefix matching.
+*   `ast_query` reads a file directly from disk in real-time, parses it, and evaluates your custom S-expression query.
+*   `go_to_definition` & `find_references` first check the SQLite index tables. If a supported language server (LSP) is active, it routes JSON-RPC requests directly to the language server to fetch accurate compile-time details, guaranteeing precision.
 
 ---
 
-## LSP Integration (Optional)
+## Database Schema
 
-For precise go-to-definition and find-references, install language servers:
+SQLite schema definition used for data storage:
 
-| Language | Server | Installation |
-|---|---|---|
-| Java | [Eclipse JDT LS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) | `brew install jdtls` or download from releases |
-| Kotlin | [kotlin-language-server](https://github.com/fwcd/kotlin-language-server) | Download from releases |
-| C/C++ | [clangd](https://clangd.llvm.org/) | `apt install clangd` / `brew install llvm` |
-
-The server will automatically try to spawn the appropriate LSP when `--local` is provided, and gracefully fall back to the SQLite index if a language server is unavailable.
-
-Set the `JDTLS_PATH` environment variable to override the default `jdtls` binary path.
-
----
-
-## Architecture
-
-```
-main.rs          CLI parsing, DB init, spawns indexer + watcher tasks, calls server::run()
-server.rs        rmcp ServerHandler — registers all 7 MCP tools; serves stdio or Streamable HTTP (`/mcp`)
-db/              r2d2 SQLite pool; schema.rs creates tables + FTS5 virtual tables + triggers
-indexer/         tree-sitter symbol extraction (java.rs, kotlin.rs, cpp.rs); mod.rs walks
-                 the source tree, hashes files to skip unchanged ones, stores symbols + lines
-watcher.rs       notify-debouncer watches --local path; calls indexer::index_file on changes
-tools/           One file per MCP tool; each tool struct holds a DbPool and optional LspManager
-lsp/             LspClient (JSON-RPC over stdio) + LspManager (lazy per-language spawning)
-                 jdtls.rs / kotlin_ls.rs / clangd.rs — spawner helpers
-```
-
-### Database Schema
-
-| Table | Purpose |
-|---|---|
-| `files` | One row per indexed source file: `path`, `language`, `mtime`, `hash` |
-| `symbols` | Extracted symbols; FK → `files`; `name`, `kind`, `container`, `signature`, position |
-| `symbols_fts` | FTS5 virtual table over `symbols(name, container, kind)` — kept in sync by triggers |
-| `file_lines` | Every source line stored for full-text search |
-| `file_lines_fts` | FTS5 virtual table over `file_lines(content)` — kept in sync by triggers |
-| `index_progress` | Key/value progress counters (`status`, `total_files`, `indexed_files`) |
+| Table | Column / Attributes | Description |
+|:---|:---|:---|
+| **`files`** | `id`, `path` (Unique), `language`, `mtime`, `hash` | Master index of tracked codebase source files. |
+| **`symbols`** | `id`, `file_id` (FK), `name`, `kind`, `start_line`, `start_col`, `container` | AST-extracted code symbols. |
+| **`symbols_fts`** | *FTS5 Virtual Table* | Fast full-text lookup for symbol name, container, and kind. |
+| **`file_lines`** | `file_id` (FK), `line_no`, `content` | Split raw line contents of all tracked files. |
+| **`file_lines_fts`**| *FTS5 Virtual Table (Trigram)* | Overlapping 3-character tokenizer for substring matching. |
+| **`index_progress`**| `key` (PK), `value` | Tracks live state metrics (`status`, `total_files`). |
 
 ---
 
-## Development
+## Development Commands
 
+Validate code and run tests locally during development:
 ```bash
-cargo build            # debug build
-cargo build --release  # optimised binary
-cargo test             # run tests
-RUST_LOG=debug cargo run -- --local /path/to/aosp
+# Debug build
+cargo build
+
+# Release optimized build
+cargo build --release
+
+# Run unit and integration tests
+cargo test
+
+# Run the server with verbose logging
+RUST_LOG=debug ./target/release/code-search-mcp --local /path/to/source
 ```
 
-Files > 2 MB and non-UTF-8 files are silently skipped. The `out/` and `.repo/` directories are excluded from indexing.
-
----
-
-## License
-
-MIT
+> [!NOTE]
+> Large files (> 2 MB), non-UTF-8 source files, and build directories (`out/`, `.repo/`, `target/`) are automatically excluded from indexing.
