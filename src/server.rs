@@ -174,7 +174,7 @@ pub async fn run(cli: Cli, pool: DbPool) -> Result<()> {
 
     match cli.transport {
         TransportMode::Stdio => run_stdio(server).await,
-        TransportMode::Http => run_http(server, cli.port).await,
+        TransportMode::Http => run_http(server, cli.port, cli.allow_remote).await,
     }
 }
 
@@ -185,7 +185,7 @@ async fn run_stdio(server: AospMcpServer) -> Result<()> {
     Ok(())
 }
 
-async fn run_http(server: AospMcpServer, port: u16) -> Result<()> {
+async fn run_http(server: AospMcpServer, port: u16, allow_remote: bool) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
         session::local::LocalSessionManager,
@@ -195,10 +195,16 @@ async fn run_http(server: AospMcpServer, port: u16) -> Result<()> {
 
     let ct = tokio_util::sync::CancellationToken::new();
 
+    let mut config = StreamableHttpServerConfig::default()
+        .with_cancellation_token(ct.child_token());
+    if allow_remote {
+        config = config.disable_allowed_hosts();
+    }
+
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+        config,
     );
 
     let router = axum::Router::new().nest_service("/mcp", service);

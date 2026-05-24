@@ -117,6 +117,7 @@ The optimized binary will be created at `target/release/code-search-mcp`.
 | `--index-threads <N>`| `SEARCH_INDEX_THREADS`| *CPU Cores* | Maximum parallel indexing workers. |
 | `--no-watch` | — | `false` | Disable the file watcher for incremental file updates. |
 | `--no-fts-rebuild` | — | `false` | Skip the background FTS trigram index builder (runs query-only text searches). |
+| `--allow-remote` | `SEARCH_ALLOW_REMOTE` | `false` | Allow remote connections / any Host header (disables host validation). |
 
 Enable verbose logging by prefixing execution with `RUST_LOG=debug`.
 

@@ -45,6 +45,10 @@ pub struct Cli {
     /// Skip the background FTS trigram rebuild (server will use slower LIKE fallback)
     #[arg(long, default_value = "false")]
     pub no_fts_rebuild: bool,
+
+    /// Allow remote connections / any Host header (disables host validation)
+    #[arg(long, default_value = "false", env = "SEARCH_ALLOW_REMOTE")]
+    pub allow_remote: bool,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
