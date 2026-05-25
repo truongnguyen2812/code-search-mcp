@@ -116,16 +116,6 @@ pub fn rebuild_fts_background(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
-/// Check if FTS trigram index is ready for use.
-pub fn is_fts_ready(conn: &rusqlite::Connection) -> bool {
-    conn.query_row(
-        "SELECT COALESCE((SELECT value FROM index_progress WHERE key = 'fts_status'), 'ready')",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .map(|s| s == "ready")
-    .unwrap_or(true)
-}
 
 const CREATE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS files (

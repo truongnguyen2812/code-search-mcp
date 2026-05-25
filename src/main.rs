@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub no_watch: bool,
 
-    /// Skip the background FTS trigram rebuild (server will use slower LIKE fallback)
+    /// Skip the background FTS trigram rebuild (FTS index is required for search tools)
     #[arg(long, default_value = "false")]
     pub no_fts_rebuild: bool,
 
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
                 }
             });
         } else {
-            info!("FTS rebuild skipped (--no-fts-rebuild). Text search will use LIKE fallback.");
+            info!("FTS rebuild skipped (--no-fts-rebuild). Search tools will be unavailable or return empty results until FTS is rebuilt.");
         }
         info!("No --local path provided; running in query-only mode");
     }
