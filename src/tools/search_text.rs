@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::db::DbPool;
-use crate::db::schema::is_fts_ready;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchTextInput {
@@ -48,15 +47,11 @@ impl SearchTextTool {
             return Ok(Vec::new());
         }
 
-        let fts_available = is_fts_ready(&conn);
-
         // Get matching (file_id, line_no, content) triples
         let matches: Vec<(i64, i64, String)> = if use_regex {
-            search_regex(&conn, &query, &input.language, &input.path_filter, limit, fts_available)?
-        } else if fts_available {
-            search_by_fts_trigram(&conn, &query, &input.language, &input.path_filter, limit)?
+            search_regex(&conn, &query, &input.language, &input.path_filter, limit)?
         } else {
-            search_by_like(&conn, &query, &input.language, &input.path_filter, limit)?
+            search_by_fts_trigram(&conn, &query, &input.language, &input.path_filter, limit)?
         };
 
         if matches.is_empty() {
@@ -117,39 +112,36 @@ fn search_regex(
     language: &Option<String>,
     path_filter: &Option<String>,
     limit: i64,
-    fts_available: bool,
 ) -> Result<Vec<(i64, i64, String)>> {
     let re = Regex::new(pattern)?;
 
     // Try to extract a literal substring from the regex for pre-filtering
     let literal = extract_longest_literal(pattern);
 
-    if fts_available {
-        if let Some(lit) = &literal {
-            if lit.len() >= 3 {
-                // Pre-filter using FTS5 trigram on the literal fragment, then apply regex
-                let fts_query = escape_fts5_trigram(lit);
-                let mut stmt = conn.prepare(
-                    "SELECT fl.file_id, fl.line_no, fl.content
-                     FROM file_lines_fts fts
-                     JOIN file_lines fl ON fts.rowid = fl.rowid
-                     JOIN files f ON fl.file_id = f.id
-                     WHERE file_lines_fts MATCH ?1
-                       AND (?2 IS NULL OR f.language = ?2)
-                       AND (?3 IS NULL OR f.path LIKE '%' || ?3 || '%')
-                     ORDER BY f.path, fl.line_no",
-                )?;
-                let rows = stmt.query_map(
-                    rusqlite::params![fts_query, language, path_filter],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
-                )?;
-                let results: Vec<(i64, i64, String)> = rows
-                    .flatten()
-                    .filter(|(_, _, content)| re.is_match(content))
-                    .take(limit as usize)
-                    .collect();
-                return Ok(results);
-            }
+    if let Some(lit) = &literal {
+        if lit.len() >= 3 {
+            // Pre-filter using FTS5 trigram on the literal fragment, then apply regex
+            let fts_query = escape_fts5_trigram(lit);
+            let mut stmt = conn.prepare(
+                "SELECT fl.file_id, fl.line_no, fl.content
+                 FROM file_lines_fts fts
+                 JOIN file_lines fl ON fts.rowid = fl.rowid
+                 JOIN files f ON fl.file_id = f.id
+                 WHERE file_lines_fts MATCH ?1
+                   AND (?2 IS NULL OR f.language = ?2)
+                   AND (?3 IS NULL OR f.path LIKE '%' || ?3 || '%')
+                 ORDER BY f.path, fl.line_no",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![fts_query, language, path_filter],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            )?;
+            let results: Vec<(i64, i64, String)> = rows
+                .flatten()
+                .filter(|(_, _, content)| re.is_match(content))
+                .take(limit as usize)
+                .collect();
+            return Ok(results);
         }
     }
 
@@ -174,30 +166,6 @@ fn search_regex(
     Ok(results)
 }
 
-/// Fallback LIKE-based text search (used when FTS index is not yet ready).
-fn search_by_like(
-    conn: &rusqlite::Connection,
-    query: &str,
-    language: &Option<String>,
-    path_filter: &Option<String>,
-    limit: i64,
-) -> Result<Vec<(i64, i64, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT fl.file_id, fl.line_no, fl.content
-         FROM file_lines fl
-         JOIN files f ON fl.file_id = f.id
-         WHERE fl.content LIKE '%' || ?1 || '%'
-           AND (?2 IS NULL OR f.language = ?2)
-           AND (?3 IS NULL OR f.path LIKE '%' || ?3 || '%')
-         ORDER BY f.path, fl.line_no
-         LIMIT ?4",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![query, language, path_filter, limit],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
-    )?;
-    Ok(rows.flatten().collect())
-}
 
 /// Batch fetch file paths for a set of file IDs.
 fn batch_fetch_file_paths(

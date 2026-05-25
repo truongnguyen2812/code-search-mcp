@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::db::DbPool;
-use crate::db::schema::is_fts_ready;
 use crate::lsp::LspManager;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -77,34 +76,19 @@ impl FindReferencesTool {
         let (def_file, def_line, def_col, _def_lang) = if let Some(r) = row {
             r
         } else {
-            let anchor: Option<(String, i64, i64, String)> = if is_fts_ready(conn) {
-                let fts_query = format!("\"{}\"", symbol.replace('"', "\"\""));
-                conn.query_row(
-                    "SELECT f.path, fl.line_no, instr(fl.content, ?1), f.language
-                     FROM file_lines_fts fts
-                     JOIN file_lines fl ON fts.rowid = fl.rowid
-                     JOIN files f ON fl.file_id = f.id
-                     WHERE file_lines_fts MATCH ?2
-                       AND (?3 IS NULL OR f.language = ?3)
-                     ORDER BY f.path, fl.line_no
-                     LIMIT 1",
-                    rusqlite::params![symbol, fts_query, language],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                ).ok()
-            } else {
-                let pattern = format!("%{}%", symbol);
-                conn.query_row(
-                    "SELECT f.path, fl.line_no, instr(fl.content, ?1), f.language
-                     FROM file_lines fl
-                     JOIN files f ON fl.file_id = f.id
-                     WHERE fl.content LIKE ?2
-                       AND (?3 IS NULL OR f.language = ?3)
-                     ORDER BY f.path, fl.line_no
-                     LIMIT 1",
-                    rusqlite::params![symbol, pattern, language],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                ).ok()
-            };
+            let fts_query = format!("\"{}\"", symbol.replace('"', "\"\""));
+            let anchor: Option<(String, i64, i64, String)> = conn.query_row(
+                "SELECT f.path, fl.line_no, instr(fl.content, ?1), f.language
+                 FROM file_lines_fts fts
+                 JOIN file_lines fl ON fts.rowid = fl.rowid
+                 JOIN files f ON fl.file_id = f.id
+                 WHERE file_lines_fts MATCH ?2
+                   AND (?3 IS NULL OR f.language = ?3)
+                 ORDER BY f.path, fl.line_no
+                 LIMIT 1",
+                rusqlite::params![symbol, fts_query, language],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).ok();
 
             let Some((file, line_no, col_1based, lang)) = anchor else {
                 return Ok(vec![]);
@@ -144,55 +128,29 @@ impl FindReferencesTool {
         input: &FindReferencesInput,
         limit: i64,
     ) -> Result<Vec<ReferenceResult>> {
-        if is_fts_ready(conn) {
-            // Use FTS5 trigram index for fast substring matching
-            let fts_query = format!("\"{}\"", input.symbol.replace('"', "\"\""));
-            let mut stmt = conn.prepare(
-                "SELECT f.path, fl.line_no, fl.content, f.language
-                 FROM file_lines_fts fts
-                 JOIN file_lines fl ON fts.rowid = fl.rowid
-                 JOIN files f ON fl.file_id = f.id
-                 WHERE file_lines_fts MATCH ?1
-                   AND (?2 IS NULL OR f.language = ?2)
-                 ORDER BY f.path, fl.line_no
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(
-                rusqlite::params![fts_query, input.language, limit],
-                |row| {
-                    Ok(ReferenceResult {
-                        file: row.get(0)?,
-                        line_no: row.get(1)?,
-                        content: row.get(2)?,
-                        language: row.get(3)?,
-                    })
-                },
-            )?;
-            Ok(rows.flatten().collect())
-        } else {
-            // Fallback to LIKE while FTS is rebuilding
-            let pattern = format!("%{}%", input.symbol);
-            let mut stmt = conn.prepare(
-                "SELECT f.path, fl.line_no, fl.content, f.language
-                 FROM file_lines fl
-                 JOIN files f ON fl.file_id = f.id
-                 WHERE fl.content LIKE ?1
-                   AND (?2 IS NULL OR f.language = ?2)
-                 ORDER BY f.path, fl.line_no
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(
-                rusqlite::params![pattern, input.language, limit],
-                |row| {
-                    Ok(ReferenceResult {
-                        file: row.get(0)?,
-                        line_no: row.get(1)?,
-                        content: row.get(2)?,
-                        language: row.get(3)?,
-                    })
-                },
-            )?;
-            Ok(rows.flatten().collect())
-        }
+        // Use FTS5 trigram index for fast substring matching
+        let fts_query = format!("\"{}\"", input.symbol.replace('"', "\"\""));
+        let mut stmt = conn.prepare(
+            "SELECT f.path, fl.line_no, fl.content, f.language
+             FROM file_lines_fts fts
+             JOIN file_lines fl ON fts.rowid = fl.rowid
+             JOIN files f ON fl.file_id = f.id
+             WHERE file_lines_fts MATCH ?1
+               AND (?2 IS NULL OR f.language = ?2)
+             ORDER BY f.path, fl.line_no
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![fts_query, input.language, limit],
+            |row| {
+                Ok(ReferenceResult {
+                    file: row.get(0)?,
+                    line_no: row.get(1)?,
+                    content: row.get(2)?,
+                    language: row.get(3)?,
+                })
+            },
+        )?;
+        Ok(rows.flatten().collect())
     }
 }

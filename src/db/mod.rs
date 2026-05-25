@@ -24,14 +24,3 @@ pub fn create_pool(path: &Path) -> Result<DbPool> {
     let pool = Pool::builder().max_size(16).build(manager)?;
     Ok(pool)
 }
-
-/// Run ANALYZE to update SQLite query planner statistics.
-/// Skip on large databases to prevent multi-minute freezes.
-pub fn analyze(pool: &DbPool) -> Result<()> {
-    let _conn = pool.get()?;
-    // Query approximate size or simply skip to keep indexing fast.
-    // For 250 GB databases, ANALYZE scans all indexes and takes minutes,
-    // which is not required for our highly specific symbol and text indices.
-    tracing::info!("Skipping heavy ANALYZE step to prevent startup/indexing freezes.");
-    Ok(())
-}

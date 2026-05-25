@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::db::DbPool;
-use crate::db::schema::is_fts_ready;
 use crate::lsp::LspManager;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -125,35 +124,20 @@ impl GoToDefinitionTool {
             }
 
             if results.is_empty() {
-                let mut anchor_stmt = if is_fts_ready(&conn) {
-                    let fts_query = format!("\"{}\"", input.symbol.replace('"', "\"\""));
-                    let stmt = conn.prepare(
-                        "SELECT f.path, fl.line_no, fl.content, f.language
-                         FROM file_lines_fts fts
-                         JOIN file_lines fl ON fts.rowid = fl.rowid
-                         JOIN files f ON fl.file_id = f.id
-                         WHERE file_lines_fts MATCH ?1
-                           AND (?2 IS NULL OR f.language = ?2)
-                         ORDER BY f.path, fl.line_no
-                         LIMIT 30",
-                    )?;
-                    (stmt, fts_query)
-                } else {
-                    let pattern = format!("%{}%", input.symbol);
-                    let stmt = conn.prepare(
-                        "SELECT f.path, fl.line_no, fl.content, f.language
-                         FROM file_lines fl
-                         JOIN files f ON fl.file_id = f.id
-                         WHERE fl.content LIKE ?1
-                           AND (?2 IS NULL OR f.language = ?2)
-                         ORDER BY f.path, fl.line_no
-                         LIMIT 30",
-                    )?;
-                    (stmt, pattern)
-                };
+                let fts_query = format!("\"{}\"", input.symbol.replace('"', "\"\""));
+                let mut anchor_stmt = conn.prepare(
+                    "SELECT f.path, fl.line_no, fl.content, f.language
+                     FROM file_lines_fts fts
+                     JOIN file_lines fl ON fts.rowid = fl.rowid
+                     JOIN files f ON fl.file_id = f.id
+                     WHERE file_lines_fts MATCH ?1
+                       AND (?2 IS NULL OR f.language = ?2)
+                     ORDER BY f.path, fl.line_no
+                     LIMIT 30",
+                )?;
 
-                let anchors = anchor_stmt.0.query_map(
-                    rusqlite::params![anchor_stmt.1, input.language],
+                let anchors = anchor_stmt.query_map(
+                    rusqlite::params![fts_query, input.language],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,

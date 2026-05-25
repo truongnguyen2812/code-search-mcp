@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::db::DbPool;
-use crate::db::schema::is_fts_ready;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IndexStatusInput {}
@@ -55,16 +54,13 @@ impl IndexStatusTool {
             .unwrap_or_else(|_| "0".to_string());
         let indexed_files: i64 = indexed_str.parse().unwrap_or(0);
 
-        let fts_status: String = if is_fts_ready(&conn) {
-            "ready".to_string()
-        } else {
-            conn.query_row(
+        let fts_status: String = conn
+            .query_row(
                 "SELECT value FROM index_progress WHERE key = 'fts_status'",
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "unknown".to_string())
-        };
+            .unwrap_or_else(|_| "ready".to_string());
 
         let stored_files: i64 = conn
             .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))

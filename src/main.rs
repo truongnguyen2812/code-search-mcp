@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub no_watch: bool,
 
-    /// Skip the background FTS trigram rebuild (server will use slower LIKE fallback)
+    /// Skip the background FTS trigram rebuild (FTS index is required for search tools)
     #[arg(long, default_value = "false")]
     pub no_fts_rebuild: bool,
 
@@ -113,12 +113,6 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = indexer::index_codebase(&pool_clone, &local_path_clone, threads).await {
                 tracing::error!("Indexer error: {e}");
-            } else {
-                tracing::info!("Indexing complete. Running post-index optimizations...");
-                // Run ANALYZE for query planner
-                if let Err(e) = db::analyze(&pool_clone) {
-                    tracing::warn!("ANALYZE failed: {e}");
-                }
             }
 
             // FTS rebuild runs AFTER indexer finishes to avoid write lock contention
@@ -153,7 +147,9 @@ async fn main() -> Result<()> {
                 }
             });
         } else {
-            info!("FTS rebuild skipped (--no-fts-rebuild). Text search will use LIKE fallback.");
+            info!(
+                "FTS rebuild skipped (--no-fts-rebuild). Search tools will be unavailable or return empty results until FTS is rebuilt."
+            );
         }
         info!("No --local path provided; running in query-only mode");
     }
