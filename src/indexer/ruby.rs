@@ -15,13 +15,8 @@ pub fn extract_symbols(source: &str) -> Vec<Symbol> {
     };
 
     let mut symbols = Vec::new();
-    visit_node(tree.root_node(), source, "", &mut symbols);
-    symbols
-}
 
-fn visit_node(root: Node, source: &str, root_container: &str, symbols: &mut Vec<Symbol>) {
-    let mut stack: Vec<(Node, String)> = vec![(root, root_container.to_string())];
-    while let Some((node, container)) = stack.pop() {
+    super::traverse_tree(tree.root_node(), "", |node, container| {
         match node.kind() {
             "class" | "module" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
@@ -35,7 +30,7 @@ fn visit_node(root: Node, source: &str, root_container: &str, symbols: &mut Vec<
                         start_col: sc,
                         end_line: el,
                         end_col: ec,
-                        container: container.clone(),
+                        container: container.to_string(),
                         signature: node_text(node, source),
                     });
 
@@ -44,10 +39,7 @@ fn visit_node(root: Node, source: &str, root_container: &str, symbols: &mut Vec<
                     } else {
                         format!("{container}::{name}")
                     };
-                    for i in 0..node.child_count() {
-                        stack.push((node.child(i).unwrap(), new_container.clone()));
-                    }
-                    continue;
+                    return Some(Some(new_container));
                 }
             }
             "method" | "singleton_method" => {
@@ -61,18 +53,17 @@ fn visit_node(root: Node, source: &str, root_container: &str, symbols: &mut Vec<
                         start_col: sc,
                         end_line: el,
                         end_col: ec,
-                        container: container.clone(),
+                        container: container.to_string(),
                         signature: node_text(node, source),
                     });
                 }
             }
             _ => {}
         }
+        Some(None)
+    });
 
-        for i in 0..node.child_count() {
-            stack.push((node.child(i).unwrap(), container.clone()));
-        }
-    }
+    symbols
 }
 
 fn node_text(node: Node, source: &str) -> String {

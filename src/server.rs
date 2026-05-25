@@ -32,24 +32,24 @@ use crate::tools::search_text::SearchTextInput;
 /// The MCP server handler — holds shared state accessible to all tool calls.
 #[derive(Clone)]
 #[allow(dead_code)]
-pub struct AospMcpServer {
+pub struct CodeSearchMcpServer {
     pool: DbPool,
     lsp: Option<Arc<LspManager>>,
-    tool_router: ToolRouter<AospMcpServer>,
+    tool_router: ToolRouter<CodeSearchMcpServer>,
 }
 
-impl AospMcpServer {
+impl CodeSearchMcpServer {
     pub fn new(pool: DbPool, lsp: Option<Arc<LspManager>>) -> Self {
         Self {
             pool,
             lsp,
-            tool_router: AospMcpServer::tool_router(),
+            tool_router: CodeSearchMcpServer::tool_router(),
         }
     }
 }
 
 #[tool_router]
-impl AospMcpServer {
+impl CodeSearchMcpServer {
     /// Search for symbols (classes, methods, functions, fields) by name or glob pattern.
     #[tool(description = "Search for symbols in the source codebase by name or glob pattern. Supports wildcards (* and ?). Optionally filter by language (java/kotlin/c/cpp) or kind (class/method/function/field/property/struct/enum/interface).")]
     async fn search_symbols(&self, Parameters(input): Parameters<SearchSymbolsInput>) -> Result<CallToolResult, ErrorData> {
@@ -148,7 +148,7 @@ impl AospMcpServer {
 }
 
 #[tool_handler]
-impl ServerHandler for AospMcpServer {
+impl ServerHandler for CodeSearchMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -170,22 +170,28 @@ impl ServerHandler for AospMcpServer {
 
 pub async fn run(cli: Cli, pool: DbPool) -> Result<()> {
     let lsp = cli.local.as_ref().map(|root| LspManager::new(root.clone()));
-    let server = AospMcpServer::new(pool, lsp);
+    let server = CodeSearchMcpServer::new(pool, lsp.clone());
 
-    match cli.transport {
+    let res = match cli.transport {
         TransportMode::Stdio => run_stdio(server).await,
         TransportMode::Http => run_http(server, cli.port, cli.allow_remote).await,
+    };
+
+    if let Some(lsp_mgr) = lsp {
+        lsp_mgr.shutdown_all();
     }
+
+    res
 }
 
-async fn run_stdio(server: AospMcpServer) -> Result<()> {
+async fn run_stdio(server: CodeSearchMcpServer) -> Result<()> {
     info!("Starting MCP server on stdio transport");
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
-async fn run_http(server: AospMcpServer, port: u16, allow_remote: bool) -> Result<()> {
+async fn run_http(server: CodeSearchMcpServer, port: u16, allow_remote: bool) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
         session::local::LocalSessionManager,

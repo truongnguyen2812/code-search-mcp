@@ -106,7 +106,7 @@ fn query_by_fts(
     kind: &Option<String>,
     limit: i64,
 ) -> Result<Vec<SymbolResult>> {
-    let fts_query = format!("{query}*");
+    let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
     let mut stmt = conn.prepare(
         "SELECT s.name, s.kind, s.container, f.path, f.language, s.start_line, s.start_col, s.signature
          FROM symbols_fts fts
@@ -135,10 +135,9 @@ fn query_by_like(
         "SELECT s.name, s.kind, s.container, f.path, f.language, s.start_line, s.start_col, s.signature
          FROM symbols s
          JOIN files f ON s.file_id = f.id
-                 WHERE s.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+         WHERE s.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
            AND (?2 IS NULL OR f.language = ?2)
            AND (?3 IS NULL OR s.kind = ?3)
-         ORDER BY length(s.name), s.name
          LIMIT ?4",
     )?;
     let rows = stmt.query_map(

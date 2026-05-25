@@ -31,10 +31,26 @@ pub struct LspClient {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     request_id: i64,
-    _child: Child,
+    child: Child,
 }
 
 impl LspClient {
+    /// Check if the LSP server process is still running.
+    pub fn is_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true,
+            _ => false,
+        }
+    }
+
+    /// Shutdown the LSP server gracefully or force-kill if needed.
+    pub fn shutdown(&mut self) -> Result<()> {
+        let _ = self.notify("shutdown", serde_json::json!({}));
+        let _ = self.notify("exit", serde_json::json!({}));
+        let _ = self.child.kill();
+        Ok(())
+    }
+
     /// Spawn a new LSP server process.
     pub fn spawn(program: &str, args: &[&str], root: &PathBuf) -> Result<Self> {
         let mut child = std::process::Command::new(program)
@@ -52,7 +68,7 @@ impl LspClient {
             stdin,
             reader,
             request_id: 0,
-            _child: child,
+            child,
         };
 
         // Send initialize
@@ -189,6 +205,12 @@ impl LspManager {
             .ok_or_else(|| anyhow::anyhow!("No LSP for language: {language}"))?;
 
         let mut clients = self.clients.lock();
+        if let Some(client) = clients.get_mut(server_key) {
+            if !client.is_alive() {
+                warn!("LSP client for {server_key} has exited. Removing and spawning a new one.");
+                clients.remove(server_key);
+            }
+        }
         if clients.contains_key(server_key) {
             return Ok(server_key.to_string());
         }
@@ -278,6 +300,22 @@ impl LspManager {
         let response: serde_json::Value = client.request("textDocument/references", params)?;
 
         Ok(parse_lsp_locations(&response))
+    }
+
+    /// Gracefully shutdown all active LSP clients.
+    pub fn shutdown_all(&self) {
+        let mut clients = self.clients.lock();
+        for (key, client) in clients.iter_mut() {
+            tracing::info!("Shutting down LSP server for {key}");
+            let _ = client.shutdown();
+        }
+        clients.clear();
+    }
+}
+
+impl Drop for LspManager {
+    fn drop(&mut self) {
+        self.shutdown_all();
     }
 }
 

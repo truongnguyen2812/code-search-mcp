@@ -3,48 +3,107 @@ use tracing::info;
 
 use crate::db::DbPool;
 
-/// Current schema version. Bump this when making breaking schema changes.
-const SCHEMA_VERSION: i64 = 2;
-
-/// Fast, non-blocking migration. Only creates base tables.
-/// All heavy work (FTS rebuild, index creation) is deferred to background.
+/// Fast, non-blocking table creation. Creates all base tables, FTS tables, and triggers.
 pub fn run_migrations(pool: &DbPool) -> Result<()> {
     let conn = pool.get()?;
     conn.execute_batch(CREATE_TABLES)?;
 
-    // Check current schema version and schedule migration if needed
-    let current_version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    if current_version < SCHEMA_VERSION {
-        info!(
-            "Schema v{} detected (target: v{}). Heavy migration will run in background.",
-            current_version, SCHEMA_VERSION
-        );
-        // Just mark that FTS needs rebuilding — don't do any heavy work here
-        conn.execute(
-            "INSERT OR REPLACE INTO index_progress(key, value) VALUES ('fts_status', 'pending_migration')",
-            [],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_version(version) VALUES (?1)",
-            [SCHEMA_VERSION],
-        )?;
-    }
+    // Ensure fts_status is set to 'ready'
+    conn.execute(
+        "INSERT OR IGNORE INTO index_progress(key, value) VALUES ('fts_status', 'ready')",
+        [],
+    )?;
 
     Ok(())
 }
 
-/// Rebuild the FTS5 trigram index in the background with progress logging.
-/// Also creates optional indexes that are too expensive for synchronous startup.
+/// Rebuild or create optional indexes in the background.
 /// Call this from a spawned task so the server can start serving immediately.
 pub fn rebuild_fts_background(pool: &DbPool) -> Result<()> {
-    let conn = pool.get()?;
+    let mut conn = pool.get()?;
+
+    // Self-healing migration for trigram symbols_fts (runs in background)
+    let has_trigram: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE name='symbols_fts' AND sql LIKE '%tokenize=%'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if !has_trigram {
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE name='symbols_fts'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if exists {
+            info!("Upgrading symbols_fts table to use trigram tokenizer in background...");
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO index_progress(key, value) VALUES ('fts_status', 'upgrading')",
+                [],
+            );
+            
+            let _ = conn.execute("DROP TABLE IF EXISTS symbols_fts", []);
+            let _ = conn.execute(
+                "CREATE VIRTUAL TABLE symbols_fts USING fts5(
+                    name,
+                    container,
+                    kind,
+                    content='symbols',
+                    content_rowid='id',
+                    tokenize='trigram'
+                );",
+                [],
+            );
+
+            info!("Populating symbols_fts index with trigram tokens in background...");
+            let total: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0)).unwrap_or(0);
+            if total > 0 {
+                let min_id: i64 = conn.query_row("SELECT COALESCE(MIN(id), 0) FROM symbols", [], |r| r.get(0)).unwrap_or(0);
+                let max_id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM symbols", [], |r| r.get(0)).unwrap_or(0);
+                
+                let batch_size = 50000;
+                let mut current_id = min_id;
+                let mut processed = 0;
+                
+                while current_id <= max_id {
+                    let next_id = current_id + batch_size;
+                    
+                    let tx = conn.transaction()?;
+                    tx.execute(
+                        "INSERT INTO symbols_fts(rowid, name, container, kind)
+                         SELECT id, name, container, kind
+                         FROM symbols
+                         WHERE id >= ?1 AND id < ?2",
+                        rusqlite::params![current_id, next_id],
+                    )?;
+                    tx.commit()?;
+                    
+                    let batch_count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM symbols WHERE id >= ?1 AND id < ?2",
+                        rusqlite::params![current_id, next_id],
+                        |r| r.get(0),
+                    ).unwrap_or(0);
+                    
+                    processed += batch_count;
+                    current_id = next_id;
+                    
+                    let done_val = std::cmp::min(processed as usize, total as usize);
+                    let bar_str = format_progress_bar(done_val, total as usize);
+                    info!("Upgrading symbols_fts: {bar_str}");
+                }
+            }
+            
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO index_progress(key, value) VALUES ('fts_status', 'ready')",
+                [],
+            );
+            info!("symbols_fts index upgrade complete.");
+        }
+    }
 
     // Create optional indexes in background (too slow for synchronous startup on large DBs)
     info!("Creating supplementary indexes in background...");
@@ -53,94 +112,6 @@ pub fn rebuild_fts_background(pool: &DbPool) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_symbols_container ON symbols(container);",
     )?;
     info!("Supplementary indexes ready.");
-
-    // Check if FTS rebuild/migration is needed
-    let fts_status: String = conn
-        .query_row(
-            "SELECT COALESCE((SELECT value FROM index_progress WHERE key = 'fts_status'), 'ready')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "ready".to_string());
-
-    if fts_status == "ready" {
-        return Ok(());
-    }
-
-    // If pending_migration, we need to drop old FTS and recreate with trigram tokenizer
-    if fts_status == "pending_migration" {
-        info!("Dropping old FTS table and recreating with trigram tokenizer...");
-        conn.execute_batch(
-            "DROP TRIGGER IF EXISTS file_lines_ai;
-             DROP TRIGGER IF EXISTS file_lines_ad;
-             DROP TRIGGER IF EXISTS file_lines_au;
-             DROP TABLE IF EXISTS file_lines_fts;",
-        )?;
-        conn.execute_batch(CREATE_FTS_TRIGRAM)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO index_progress(key, value) VALUES ('fts_status', 'rebuilding')",
-            [],
-        )?;
-        info!("FTS trigram table created. Starting data rebuild...");
-    }
-
-    let total_lines: i64 = conn
-        .query_row("SELECT COUNT(*) FROM file_lines", [], |row| row.get(0))
-        .unwrap_or(0);
-
-    info!(
-        "FTS trigram rebuild starting ({} lines to index)...",
-        total_lines
-    );
-
-    // For very large databases, do a batched rebuild instead of the single 'rebuild' command
-    // which can take hours and provides no progress feedback.
-    if total_lines > 1_000_000 {
-        rebuild_fts_batched(&conn, total_lines)?;
-    } else {
-        conn.execute_batch("INSERT INTO file_lines_fts(file_lines_fts) VALUES('rebuild');")?;
-    }
-
-    // Mark FTS as ready
-    conn.execute(
-        "INSERT OR REPLACE INTO index_progress(key, value) VALUES ('fts_status', 'ready')",
-        [],
-    )?;
-    info!("FTS trigram rebuild complete.");
-    Ok(())
-}
-
-/// Batched FTS rebuild with progress logging for large databases.
-fn rebuild_fts_batched(conn: &rusqlite::Connection, total_lines: i64) -> Result<()> {
-    const BATCH_SIZE: i64 = 500_000;
-    let mut offset: i64 = 0;
-    let mut indexed: i64 = 0;
-
-    loop {
-        let inserted = conn.execute(
-            "INSERT INTO file_lines_fts(rowid, content)
-             SELECT rowid, content FROM file_lines
-             ORDER BY rowid
-             LIMIT ?1 OFFSET ?2",
-            rusqlite::params![BATCH_SIZE, offset],
-        )?;
-
-        indexed += inserted as i64;
-        let pct = if total_lines > 0 {
-            (indexed * 100) / total_lines
-        } else {
-            100
-        };
-        info!(
-            "FTS rebuild progress: {}/{} lines ({}%)",
-            indexed, total_lines, pct
-        );
-
-        if (inserted as i64) < BATCH_SIZE {
-            break;
-        }
-        offset += BATCH_SIZE;
-    }
 
     Ok(())
 }
@@ -157,10 +128,6 @@ pub fn is_fts_ready(conn: &rusqlite::Connection) -> bool {
 }
 
 const CREATE_TABLES: &str = "
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY
-);
-
 CREATE TABLE IF NOT EXISTS files (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     path    TEXT    UNIQUE NOT NULL,
@@ -191,7 +158,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
     container,
     kind,
     content='symbols',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
@@ -222,11 +190,7 @@ CREATE TABLE IF NOT EXISTS index_progress (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-";
 
-/// FTS5 with trigram tokenizer — enables fast substring matching via inverted index.
-/// This replaces LIKE '%term%' full table scans with indexed lookups.
-const CREATE_FTS_TRIGRAM: &str = "
 CREATE VIRTUAL TABLE IF NOT EXISTS file_lines_fts USING fts5(
     content,
     content='file_lines',
@@ -251,3 +215,19 @@ CREATE TRIGGER IF NOT EXISTS file_lines_au AFTER UPDATE ON file_lines BEGIN
     VALUES (new.rowid, new.content);
 END;
 ";
+
+/// Generates a visual text-based progress bar for console logging.
+fn format_progress_bar(done: usize, total: usize) -> String {
+    let width = 20;
+    let percent = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+    let filled = (percent * width as f64).round() as usize;
+    let mut bar = String::new();
+    for i in 0..width {
+        if i < filled {
+            bar.push('█');
+        } else {
+            bar.push('░');
+        }
+    }
+    format!("[{bar}] {done}/{total} ({:.1}%)", percent * 100.0)
+}

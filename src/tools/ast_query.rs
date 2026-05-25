@@ -37,12 +37,12 @@ impl AstQueryTool {
             Language::Java => tree_sitter_java::LANGUAGE.into(),
             Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
             Language::C | Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Language::Go => tree_sitter_go::LANGUAGE.into(),
+            Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Language::Json => tree_sitter_json::LANGUAGE.into(),
             Language::Make
-            | Language::Go
             | Language::Groovy
             | Language::Gradle
-            | Language::Ruby
-            | Language::Json
             | Language::Xml
             | Language::Yaml
             | Language::Aidl => {

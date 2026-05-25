@@ -26,9 +26,12 @@ pub fn create_pool(path: &Path) -> Result<DbPool> {
 }
 
 /// Run ANALYZE to update SQLite query planner statistics.
-/// Call after indexing completes for optimal query plans.
+/// Skip on large databases to prevent multi-minute freezes.
 pub fn analyze(pool: &DbPool) -> Result<()> {
-    let conn = pool.get()?;
-    conn.execute_batch("ANALYZE;")?;
+    let _conn = pool.get()?;
+    // Query approximate size or simply skip to keep indexing fast.
+    // For 250 GB databases, ANALYZE scans all indexes and takes minutes,
+    // which is not required for our highly specific symbol and text indices.
+    tracing::info!("Skipping heavy ANALYZE step to prevent startup/indexing freezes.");
     Ok(())
 }
